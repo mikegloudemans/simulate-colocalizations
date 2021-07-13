@@ -18,11 +18,12 @@ import numpy as np
 from scipy import stats
 
 config_file = sys.argv[1]
+
+locus_num = sys.argv[2]
+
 settings = config.load_config(config_file)
 
-now = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-
-base_output_dir = f"output/simulations/{settings['out_dir_group']}/{now}"
+base_output_dir = f"output/simulations/{settings['out_dir_group']}/"
 os.makedirs(f"{base_output_dir}/hg19/gwas", exist_ok=True)
 os.makedirs(f"{base_output_dir}/hg19/eqtl", exist_ok=True)
 os.makedirs(f"{base_output_dir}/hg38/gwas", exist_ok=True)
@@ -30,83 +31,87 @@ os.makedirs(f"{base_output_dir}/hg38/eqtl", exist_ok=True)
 
 copyfile(config_file, f"{base_output_dir}/settings_used.config")
 
+tmp_dir = f"tmp/{locus_num}"
+os.makedirs(tmp_dir, exist_ok=True)
+
 def main():
-	with open(f"{base_output_dir}/answer_key.txt", "w") as w:
-		w.write("test_case\tseed_chrom\tseed_pos\tcausal_variants\tcases_n\tcontrols_n\teqtl_n\tsnps_n\n")
+
+	# NOTE: There is a possible race condition here; try to fix that to 
+	# make sure we're not appending to the file before the header's written
+	if locus_num == "1":
+		with open(f"{base_output_dir}/answer_key.txt", "w") as w:
+			w.write("test_case\tseed_chrom\tseed_pos\tcausal_variants\tcases_n\tcontrols_n\teqtl_n\tsnps_n\n")
 
 	# Get possible GWAS loci upfront, so we don't
 	# waste any more time on this
 
-	# NOTE: Our reference is WRONG right now because it's hg38, but 
-	# let's not worry about that right this moment
 	locus_bank = get_possible_loci(settings)
 
+	random.seed(int(locus_num))
+	
 	# NOTE: This could be dangerous because it could lead to infinite loops
-	for i in range(settings["total_test_sites"]):
 
-		random.seed(i)
-		
-		# Loop until we get a variant that works
-		while True:
+	# Loop until we get a variant that works
+	while True:
 
-			# Store settings for current run, for easy reference
-			settings["current_run"] = {}
+		# Store settings for current run, for easy reference
+		settings["current_run"] = {}
 
-			print("Starting new locus...")
-			# Choose a locus 
-			locus = random.choice(locus_bank)
-			print(locus)
+		print("Starting new locus...")
+		# Choose a locus 
+		locus = random.choice(locus_bank)
+		print(locus)
 
-			# Figure out if there's going to be a causal GWAS variant
-			gwas_log_odds = get_gwas_log_odds(settings)
+		# Figure out if there's going to be a causal GWAS variant
+		gwas_log_odds = get_gwas_log_odds(settings)
 
-			# Get all haplotypes using HAPGEN2
-			gwas_effect_sizes = run_hapgen2(settings, locus, gwas_log_odds)
+		# Get all haplotypes using HAPGEN2
+		gwas_effect_sizes = run_hapgen2(settings, locus, gwas_log_odds)
 
-			print("Got GWAS effect sizes")
+		print("Got GWAS effect sizes")
 
-			settings["current_run"]["gwas_effect_sizes"] = gwas_effect_sizes
-			if gwas_effect_sizes == "Bad variant" or gwas_effect_sizes == "Fail":
-				# Make sure HAPGEN2 actually succeeded, i.e. it was a valid site
-				print(gwas_effect_sizes)
-				continue
+		settings["current_run"]["gwas_effect_sizes"] = gwas_effect_sizes
+		if gwas_effect_sizes == "Bad variant" or gwas_effect_sizes == "Fail":
+			# Make sure HAPGEN2 actually succeeded, i.e. it was a valid site
+			print(gwas_effect_sizes)
+			continue
 
-			# Get effect sizes, using LD pairings at restrictions
-			eqtl_effect_sizes = get_eqtl_effect_sizes(settings, gwas_effect_sizes)
+		# Get effect sizes, using LD pairings at restrictions
+		eqtl_effect_sizes = get_eqtl_effect_sizes(settings, gwas_effect_sizes)
 
-			print("Got eQTL effect sizes")
+		print("Got eQTL effect sizes")
 
-			settings["current_run"]["eqtl_effect_sizes"] = eqtl_effect_sizes
-			if eqtl_effect_sizes == "Impossible LD matrix":
-				continue
+		settings["current_run"]["eqtl_effect_sizes"] = eqtl_effect_sizes
+		if eqtl_effect_sizes == "Impossible LD matrix":
+			continue
 
-			eqtl_phenotypes = get_expression_phenotypes(eqtl_effect_sizes)
-			print("Got eQTL phenotypes")
+		eqtl_phenotypes = get_expression_phenotypes(eqtl_effect_sizes)
+		print("Got eQTL phenotypes")
 
-			if "simulate_peer" in settings and settings["simulate_peer"] == "True":
-				peer_factors = simulate_peer_factors(eqtl_phenotypes, i)
+		if "simulate_peer" in settings and settings["simulate_peer"] == "True":
+			peer_factors = simulate_peer_factors(eqtl_phenotypes, locus_num)
 
-			# Finally, create summary statistics
-			sum_stats = make_sum_stats(eqtl_phenotypes)
-			print("made sumstats")
-			(eqtls, gwas) = sum_stats
+		# Finally, create summary statistics
+		sum_stats = make_sum_stats(eqtl_phenotypes)
+		print("made sumstats")
+		(eqtls, gwas) = sum_stats
 
-			if "simulate_peer" in settings and settings["simulate_peer"] == "True":
-				peer_eqtls = call_eqtls_with_peer(eqtl_phenotypes, peer_factors)
-				write_peer_sumstats(peer_eqtls, i)
+		if "simulate_peer" in settings and settings["simulate_peer"] == "True":
+			peer_eqtls = call_eqtls_with_peer(eqtl_phenotypes, peer_factors)
+			write_peer_sumstats(peer_eqtls, locus_num)
 
-			write_sumstats(eqtls, gwas, i)
-			write_answer_key(gwas_effect_sizes, eqtl_effect_sizes, locus, i)
-			write_expression_phenotypes(eqtl_phenotypes, i, locus)
+		write_sumstats(eqtls, gwas, locus_num)
+		write_answer_key(gwas_effect_sizes, eqtl_effect_sizes, locus, locus_num)
+		write_expression_phenotypes(eqtl_phenotypes, locus_num, locus)
 
-			print("wrote expression phenotypes")
+		print("wrote expression phenotypes")
 
-			if not "no_genotypes" in settings or settings["no_genotypes"] == "False":
-				write_genotypes_as_vcf(i, locus)
+		if not "no_genotypes" in settings or settings["no_genotypes"] == "False":
+			write_genotypes_as_vcf(locus_num, locus)
 
-			print("wrote genotypes as vcf")
+		print("wrote genotypes as vcf")
 
-			break
+		break
 
 	# liftOver to hg38
 	if not "liftover" in settings or settings["liftover"] == "True":
@@ -198,7 +203,7 @@ def get_possible_loci(settings):
 
 	return possible_loci
 
-def run_hapgen2(settings, locus, gwas_odds_ratio):
+def run_hapgen2(settings, locus, gwas_log_odds):
 
 	# Get the data from 1000 Genomes VCF near locus
 	filename = f"data/1KG/hg19/ALL.chr{locus[0]}.phase3_shapeit2_mvncall_integrated_v5a.20130502.genotypes.vcf.gz"
@@ -238,12 +243,12 @@ def run_hapgen2(settings, locus, gwas_odds_ratio):
 	# Format it for HAPGEN
 	# Write .haps file
 	vcf_genos = vcf.iloc[:,10:(vcf.shape[1]-2)]
-	with open("tmp/hapgen2.haps", "w") as w:
+	with open(f"{tmp_dir}/hapgen2.haps", "w") as w:
 		for i, row in vcf_genos.iterrows():
 			w.write("|".join(list(row)).replace("|", " ") + "\n")
 
 	# Write .leg file
-	with open("tmp/hapgen2.leg", "w") as w:
+	with open(f"{tmp_dir}/hapgen2.leg", "w") as w:
 		w.write("rs position X0 X1\n")
 		for i, row in vcf.iterrows():
 			w.write(" ".join([str(r) for r in [row['ID'], row['POS'], row['REF'], row['ALT']]]) + "\n")
@@ -257,7 +262,7 @@ def run_hapgen2(settings, locus, gwas_odds_ratio):
 	vcf_pos_set = set(list(vcf['POS']))
 
 	f = StringIO(subprocess.run(f"tabix {map_file} {locus[0]}:{locus[1] - settings['window']}-{locus[1] + settings['window']}".split(), capture_output=True).stdout.decode("utf-8"))
-	with open("tmp/hapgen2.map", "w") as w:
+	with open(f"{tmp_dir}/hapgen2.map", "w") as w:
 		#with open(genetic_map) as f:
 			w.write(f.readline())
 			for line in f:
@@ -276,31 +281,31 @@ def run_hapgen2(settings, locus, gwas_odds_ratio):
 
 	# Then run HAPGEN2 to get genotypes
 	try:
-		subprocess.run(f'''bin/hapgen2 -m tmp/hapgen2.map -l tmp/hapgen2.leg -h tmp/hapgen2.haps -o tmp/hapgen2_gwas.out -dl {locus[1]} 1 {10 ** gwas_odds_ratio} {10 ** (gwas_odds_ratio * 2)} -n {gwas_control_sample_size} {gwas_case_sample_size}'''.split())
-		subprocess.run(f'''bin/hapgen2 -m tmp/hapgen2.map -l tmp/hapgen2.leg -h tmp/hapgen2.haps -o tmp/hapgen2_eqtl.out -dl {locus[1]} 1 1 1 -n {eqtl_sample_size} 1'''.split())
+		subprocess.run(f'''bin/hapgen2 -m {tmp_dir}/hapgen2.map -l {tmp_dir}/hapgen2.leg -h {tmp_dir}/hapgen2.haps -o {tmp_dir}/hapgen2_gwas.out -dl {locus[1]} 1 {10 ** gwas_log_odds} {10 ** (gwas_log_odds * 2)} -n {gwas_control_sample_size} {gwas_case_sample_size}'''.split())
+		subprocess.run(f'''bin/hapgen2 -m {tmp_dir}/hapgen2.map -l {tmp_dir}/hapgen2.leg -h {tmp_dir}/hapgen2.haps -o {tmp_dir}/hapgen2_eqtl.out -dl {locus[1]} 1 1 1 -n {eqtl_sample_size} 1'''.split())
 	except:
 		return "Fail"
 
 	# Write VCF to tmp file in case we need to compute LD
-	vcf.to_csv('tmp/tmp.vcf', sep="\t", index=False, header=True)
+	vcf.to_csv(f'{tmp_dir}/tmp.vcf', sep="\t", index=False, header=True)
 	settings["current_run"]["rsids"] = vcf['ID']
 
 	gwas_effect_sizes = [0] * vcf.shape[0]
-	gwas_effect_sizes[list(vcf['POS']).index(locus[1])] = gwas_odds_ratio
+	gwas_effect_sizes[list(vcf['POS']).index(locus[1])] = gwas_log_odds
 
 	return gwas_effect_sizes
 	
 def get_gwas_log_odds(settings):
   
 	if random.random() < settings["p_gwas_causal"]:
-		return math.log10((1 + (10 ** random.uniform(settings["gwas_min_log_odds"], settings["gwas_max_log_odds"]))) ** random.choice([-1,1]))
+		return random.uniform(settings["gwas_min_log_odds"], settings["gwas_max_log_odds"]) * random.choice([-1,1])
 	else:
 		return 0
 
 def get_expression_phenotypes(eqtl_effect_sizes):
 
 	# Read haplotypes for each individual
-	haps = pd.read_csv("tmp/hapgen2_eqtl.out.controls.haps", sep=" ", header=None)
+	haps = pd.read_csv(f"{tmp_dir}/hapgen2_eqtl.out.controls.haps", sep=" ", header=None)
 	genos = np.add(haps.iloc[:, range(0,haps.shape[1]-1,2)].values, haps.iloc[:, range(1,haps.shape[1]-1,2)].values)
 
 	means = np.matmul(genos.T, eqtl_effect_sizes)
@@ -317,7 +322,7 @@ def simulate_peer_factors(phenos, index):
 		total_var = pheno_var / frac
 		peer_factors = np.random.normal(phenos, total_var-pheno_var, len(phenos))
 
-		with open(f"{base_output_dir}/hg19/eqtl/peer_factors{index}_{frac}.txt", "w") as w:
+		with open(f"{base_output_dir}/hg19/eqtl/peer_factors{locus_num}_{frac}.txt", "w") as w:
 			header = "\t".join(["ID" + str(i) for i in range(len(phenos))]) + "\n"
 			w.write(header)
 			w.write("\t".join([str(pf) for pf in peer_factors]))
@@ -329,7 +334,7 @@ def simulate_peer_factors(phenos, index):
 
 def write_expression_phenotypes(phenos, index, locus):
 	# We do this because RTC needs to re-call eQTLs with various SNPs regressed out
-	with open(f"{base_output_dir}/hg19/eqtl/eqtl_phenotypes{index}.bed", "w") as w:
+	with open(f"{base_output_dir}/hg19/eqtl/eqtl_phenotypes{locus_num}.bed", "w") as w:
 
 		header = "#chr\tstart\tend\tgene\tlength\tstrand\t" + "\t".join(["ID" + str(i) for i in range(len(phenos))]) + "\n"
 		w.write(header)
@@ -340,16 +345,16 @@ def write_expression_phenotypes(phenos, index, locus):
 		w.write("\n")
 
 	# bgzip and tabix it
-	subprocess.run(f"bgzip -f {base_output_dir}/hg19/eqtl/eqtl_phenotypes{index}.bed".split())
-	subprocess.run(f"tabix -f -S 1 -s 1 -b 2 -e 3 {base_output_dir}/hg19/eqtl/eqtl_phenotypes{index}.bed.gz".split())
+	subprocess.run(f"bgzip -f {base_output_dir}/hg19/eqtl/eqtl_phenotypes{locus_num}.bed".split())
+	subprocess.run(f"tabix -f -S 1 -s 1 -b 2 -e 3 {base_output_dir}/hg19/eqtl/eqtl_phenotypes{locus_num}.bed.gz".split())
 
 def write_genotypes_as_vcf(index, locus):
 	
-	metadata = pd.read_csv("tmp/hapgen2_eqtl.out.controls.gen", sep=" ", header=None)
-	haps = pd.read_csv("tmp/hapgen2_eqtl.out.controls.haps", sep=" ", header=None)
+	metadata = pd.read_csv(f"{tmp_dir}/hapgen2_eqtl.out.controls.gen", sep=" ", header=None)
+	haps = pd.read_csv(f"{tmp_dir}/hapgen2_eqtl.out.controls.haps", sep=" ", header=None)
 	
 	# We do this because RTC needs to re-call eQTLs with various SNPs regressed out
-	with open(f"{base_output_dir}/hg19/eqtl/eqtl_genotypes{index}.vcf".format(base_output_dir, index), "w") as w:
+	with open(f"{base_output_dir}/hg19/eqtl/eqtl_genotypes{locus_num}.vcf", "w") as w:
 
 		w.write("##fileformat=VCFv4.1\n") # This is essential; otherwise QTLtools will not work
 		header = "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t" + "\t".join(["ID" + str(i) for i in range(haps.shape[1] // 2)]) + "\n"
@@ -379,8 +384,8 @@ def write_genotypes_as_vcf(index, locus):
 
 
 	# bgzip and tabix it
-	subprocess.run(f"bgzip -f {base_output_dir}/hg19/eqtl/eqtl_genotypes{index}.vcf".split())
-	subprocess.run(f"tabix -f -S 1 -s 1 -b 2 -e 2 {base_output_dir}/hg19/eqtl/eqtl_genotypes{index}.vcf.gz".split())
+	subprocess.run(f"bgzip -f {base_output_dir}/hg19/eqtl/eqtl_genotypes{locus_num}.vcf".split())
+	subprocess.run(f"tabix -f -S 1 -s 1 -b 2 -e 2 {base_output_dir}/hg19/eqtl/eqtl_genotypes{locus_num}.vcf.gz".split())
 
 def make_sum_stats(eqtl_phenotypes):
 	eqtls = call_eqtls(eqtl_phenotypes)
@@ -390,7 +395,7 @@ def make_sum_stats(eqtl_phenotypes):
 def call_eqtls(eqtl_phenotypes):
 	# Load genotypes
 	# Read haplotypes for each individual
-	haps = pd.read_csv("tmp/hapgen2_eqtl.out.controls.haps", sep=" ", header=None)
+	haps = pd.read_csv(f"{tmp_dir}/hapgen2_eqtl.out.controls.haps", sep=" ", header=None)
 	genos = np.add(haps.iloc[:, range(0,haps.shape[1]-1,2)].values, haps.iloc[:, range(1,haps.shape[1]-1,2)].values)
 
 	# Call eQTLs
@@ -408,7 +413,7 @@ def call_eqtls_with_peer(eqtl_phenotypes, peer):
 
 	# Load genotypes
 	# Read haplotypes for each individual
-	haps = pd.read_csv("tmp/hapgen2_eqtl.out.controls.haps", sep=" ", header=None)
+	haps = pd.read_csv(f"{tmp_dir}/hapgen2_eqtl.out.controls.haps", sep=" ", header=None)
 	genos = np.add(haps.iloc[:, range(0,haps.shape[1]-1,2)].values, haps.iloc[:, range(1,haps.shape[1]-1,2)].values)
 
 	all_eqtls = []
@@ -438,9 +443,9 @@ def call_eqtls_with_peer(eqtl_phenotypes, peer):
 def run_gwas():
 	# Load genotypes
 	# Read haplotypes for each individual
-	case_haps = pd.read_csv("tmp/hapgen2_gwas.out.cases.haps", sep=" ", header=None)
+	case_haps = pd.read_csv(f"{tmp_dir}/hapgen2_gwas.out.cases.haps", sep=" ", header=None)
 	case_genos = np.add(case_haps.iloc[:, range(0,case_haps.shape[1]-1,2)].values, case_haps.iloc[:, range(1,case_haps.shape[1]-1,2)].values)
-	control_haps = pd.read_csv("tmp/hapgen2_gwas.out.controls.haps", sep=" ", header=None)
+	control_haps = pd.read_csv(f"{tmp_dir}/hapgen2_gwas.out.controls.haps", sep=" ", header=None)
 	control_genos = np.add(control_haps.iloc[:, range(0,control_haps.shape[1]-1,2)].values, control_haps.iloc[:, range(1,control_haps.shape[1]-1,2)].values)
 
 	# Run GWAS (for now, maybe just do it as a linear regression too? Makes it easily adaptable for continous phenotypes)
@@ -458,7 +463,7 @@ def run_gwas():
 
 def write_sumstats(eqtls, gwas, index):
 	#header = subprocess.check_output("cat /users/mgloud/projects/coloc_comparisons/tmp/tmp.vcf 2> /dev/null | grep \\#CHROM", shell=True).strip().split()
-	vcf = pd.read_csv("tmp/tmp.vcf", sep="\t")
+	vcf = pd.read_csv(f"{tmp_dir}/tmp.vcf", sep="\t")
 
 	# Filter down to a min MAF of 0.05 for now
 	def alt_af(x):
@@ -469,7 +474,7 @@ def write_sumstats(eqtls, gwas, index):
 		return(af)
 	vcf['AF'] = vcf['INFO'].apply(alt_af)
  
-	with open(f"{base_output_dir}/hg19/gwas/gwas_sumstats{index}.txt", "w") as w:
+	with open(f"{base_output_dir}/hg19/gwas/gwas_sumstats{locus_num}.txt", "w") as w:
 		w.write("rsid\tvariant_id\tgenome_build\tchr\tsnp_pos\tref\talt\teffect_af\tbeta\tse\tzscore\tpvalue\tn_cases\tn_controls\n")
 		for i in range(vcf.shape[0]):
 			var = vcf.iloc[i, :]
@@ -477,7 +482,7 @@ def write_sumstats(eqtls, gwas, index):
 			variant_id = f'''{var['#CHROM']}_{var["POS"]}_{var["REF"]}_{var["ALT"]}_hg19'''
 			w.write(f'''{var['ID']}\t{variant_id}\thg19\t{var['#CHROM']}\t{var["POS"]}\t{var["REF"]}\t{var["ALT"]}\t{var["AF"]}\t{g[0]}\t{g[1]}\t{g[0] / g[1]}\t{g[2]}\t{settings["current_run"]["gwas_case_sample_size"]}\t{settings["current_run"]["gwas_control_sample_size"]}\n''')
 
-	with open(f"{base_output_dir}/hg19/eqtl/eqtl_sumstats{index}.txt", "w") as w:
+	with open(f"{base_output_dir}/hg19/eqtl/eqtl_sumstats{locus_num}.txt", "w") as w:
 		w.write("feature\trsid\tvariant_id\tgenome_build\tchr\tsnp_pos\tref\talt\teffect_af\tbeta\tse\tzscore\tpvalue\tN\n")
 		for i in range(vcf.shape[0]):
 			var = vcf.iloc[i, :]
@@ -486,13 +491,13 @@ def write_sumstats(eqtls, gwas, index):
 			w.write(f'''nameless_gene\t{var['ID']}\t{variant_id}\thg19\t{var['#CHROM']}\t{var["POS"]}\t{var["REF"]}\t{var["ALT"]}\t{var["AF"]}\t{e[0]}\t{e[1]}\t{e[0] / e[1]}\t{e[2]}\t{settings["current_run"]["eqtl_sample_size"]}\n''')
 
 	# bgzip and tabix
-	subprocess.run(f"bgzip -f {base_output_dir}/hg19/gwas/gwas_sumstats{index}.txt".split())
-	subprocess.run(f"bgzip -f {base_output_dir}/hg19/eqtl/eqtl_sumstats{index}.txt".split())
-	subprocess.run(f"tabix -f -S 1 -s 4 -b 5 -e 5 {base_output_dir}/hg19/gwas/gwas_sumstats{index}.txt.gz".split())
-	subprocess.run(f"tabix -f -S 1 -s 5 -b 6 -e 6 {base_output_dir}/hg19/eqtl/eqtl_sumstats{index}.txt.gz".split())
+	subprocess.run(f"bgzip -f {base_output_dir}/hg19/gwas/gwas_sumstats{locus_num}.txt".split())
+	subprocess.run(f"bgzip -f {base_output_dir}/hg19/eqtl/eqtl_sumstats{locus_num}.txt".split())
+	subprocess.run(f"tabix -f -S 1 -s 4 -b 5 -e 5 {base_output_dir}/hg19/gwas/gwas_sumstats{locus_num}.txt.gz".split())
+	subprocess.run(f"tabix -f -S 1 -s 5 -b 6 -e 6 {base_output_dir}/hg19/eqtl/eqtl_sumstats{locus_num}.txt.gz".split())
 
 def write_peer_sumstats(eqtls, index):
-	vcf = pd.read_csv("/users/mgloud/projects/coloc_comparisons/tmp/tmp.vcf", sep="\t")
+	vcf = pd.read_csv("/users/mgloud/projects/coloc_comparisons/{tmp_dir}/tmp.vcf", sep="\t")
 
 	# Filter down to a min MAF of 0.05 for now
 	def alt_af(x):
@@ -505,7 +510,7 @@ def write_peer_sumstats(eqtls, index):
  
 	for eqtl_index in range(len(eqtls)): 
 
-		with open(f"{base_output_dir}/hg19/eqtl/eqtl_peer_sumstats{index}_{settings['peer_fraction_var_explained'][eqtl_index]}.txt", "w") as w:
+		with open(f"{base_output_dir}/hg19/eqtl/eqtl_peer_sumstats{locus_num}_{settings['peer_fraction_var_explained'][eqtl_index]}.txt", "w") as w:
 			w.write("feature\trsid\tvariant_id\tgenome_build\tchr\tsnp_pos\tref\talt\teffect_af\tbeta\tse\tzscore\tpvalue\tN\n")
 			for i in range(vcf.shape[0]):
 				var = vcf.iloc[i, :]
@@ -514,8 +519,8 @@ def write_peer_sumstats(eqtls, index):
 				w.write(f"nameless_gene\t{var['ID']}\t{variant_id}\t{hg19}\t{var['#CHROM']}\t{var['POS']}\t{var['REF']}\t{var['ALT']}\t{var['AF']}\t{e[0]}\t{e[1]}\t{e[0] / e[1]}\t{e[2]}\t{settings['current_run']['eqtl_sample_size']}\n")
 
 		# bgzip and tabix
-		subprocess.run(f'bgzip -f {base_output_dir}/hg19/eqtl/eqtl_peer_sumstats{index}_{settings["peer_fraction_var_explained"][eqtl_index]}.txt'.split())
-		subprocess.run(f"tabix -f -S 1 -s 5 -b 6 -e 6 {base_output_dir}/hg19/eqtl/eqtl_peer_sumstats{index}_{settings['peer_fraction_var_explained'][eqtl_index]}.txt.gz".split())
+		subprocess.run(f'bgzip -f {base_output_dir}/hg19/eqtl/eqtl_peer_sumstats{locus_num}_{settings["peer_fraction_var_explained"][eqtl_index]}.txt'.split())
+		subprocess.run(f"tabix -f -S 1 -s 5 -b 6 -e 6 {base_output_dir}/hg19/eqtl/eqtl_peer_sumstats{locus_num}_{settings['peer_fraction_var_explained'][eqtl_index]}.txt.gz".split())
 
 
 def write_answer_key(gwas_effect_sizes, eqtl_effect_sizes, locus, index):
@@ -531,7 +536,8 @@ def write_answer_key(gwas_effect_sizes, eqtl_effect_sizes, locus, index):
 		a.write(f'{index}\t{locus[0]}\t{locus[1]}\t{info}\t{settings["current_run"]["gwas_case_sample_size"]}\t{settings["current_run"]["gwas_control_sample_size"]}\t{settings["current_run"]["eqtl_sample_size"]}\t{len(gwas_effect_sizes)}\n')
 
 def run_liftover(settings):
-	subprocess.run(f"python scripts/liftover_sumstats_hg19_to_hg38.py {base_output_dir} {settings['total_test_sites']}".split())
+	print(f"python scripts/simulate_data/liftover_sumstats_hg19_to_hg38.py {base_output_dir} {tmp_dir} {locus_num}")
+	subprocess.run(f"python scripts/simulate_data/liftover_sumstats_hg19_to_hg38.py {base_output_dir} {tmp_dir} {locus_num}".split())
 
 if __name__ == "__main__":
 	main()
